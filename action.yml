@@ -1,0 +1,130 @@
+name: Container Scan action
+author: Steve Wood
+description: Builds containers, scans for known vulnerabilities and reports
+branding:
+  icon: 'search'
+  color: 'yellow'
+
+inputs:
+  docker-cache-from:
+    description: "List of external cache sources for buildx (e.g. type=registry,ref=ghcr.io/org/repo:latest)"
+    required: false
+    default: ""
+  docker-context:
+    description: "Build's context is the set of files located in the specified PATH or URL"
+    required: false
+    default: "./"
+  docker-file:
+    description: "Path to the Dockerfile"
+    required: false
+    default: "Dockerfile"
+  severity-cutoff:
+    description: 'Optionally specify the minimum vulnerability severity to trigger an "error" level ACS result.  Valid choices are "negligible", "low", "medium", "high" and "critical".  Any vulnerability with a severity less than this value will lead to a "warning" result.  Default is "medium".'
+    required: false
+    default: "medium"
+  upload-sarif:
+    description: "Optionally upload SARIF report (requires GitHub Advanced Security - https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/setting-up-code-scanning-for-a-repository"
+    required: false
+    default: "false"
+  fail-on-breach:
+    description: "Fails the action if vulnerabilities are discovered with a severity that breaches the cutoff threshold"
+    required: false
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v1
+
+    - name: Build and load
+      uses: docker/build-push-action@v2
+      id: build
+      with:
+        cache-from: ${{ inputs.docker-cache-from }}
+        cache-to: type=inline
+        context: ${{ inputs.docker-context }}
+        file: ${{ inputs.docker-file }}
+        load: true
+        tags: container-scan-action:latest
+
+    - name: Scan container for vulnerabilities
+      uses: anchore/scan-action@v3.2.0
+      id: scan
+      with:
+        acs-report-enable: true
+        fail-build: false
+        image: container-scan-action:latest
+        severity-cutoff: ${{ inputs.severity-cutoff }}
+
+    - name: Upload Anchore scan SARIF report
+      if: inputs.upload-sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v1
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif }}
+
+    - name: Show detected vulnerability severity breakdown
+      shell: bash
+      run: |
+        echo -e "Vulnerability summary:\n\n---" \
+        && cat ${{ steps.scan.outputs.sarif }} \
+        | jq --raw-output '. as $root
+          | { "unknown": 0, "negligible": 1, "low": 2, "medium": 3, "high": 4, "critical": 5 } as $severity_map
+          | def get_severity($ruleId): $root.runs[].tool.driver.rules[]
+            | select(.id == $ruleId)
+            | .help.markdown
+            | gsub("\\s+"; "")
+            | split("|")[19]
+            | ascii_downcase;
+          $root.runs[].results
+            | map ({ severity: get_severity(.ruleId)})
+            | group_by(.severity)
+            | map(.[0] + { "count": length })
+            | map(. + { "order": $severity_map[.severity] })
+            | sort_by(.order)
+            | .[]
+            | (.count | tostring) + " with " + .severity + " severity"'
+
+    - name: Show detected warnings
+      shell: bash
+      run: |
+        cat ${{ steps.scan.outputs.sarif }} \
+        | jq --raw-output '.runs[].results
+          | map(select(.level == "warning"))
+          | length
+          | tostring
+          | . + " warning(s)\n"' \
+        && echo "---" \
+        && cat ${{ steps.scan.outputs.sarif }} \
+        | jq --raw-output '.runs[].results
+          | map(select(.level == "warning"))
+          | .[]
+          | .level + ": " + .message.text'
+
+    - name: Show detected errors
+      shell: bash
+      run: |
+        cat ${{ steps.scan.outputs.sarif }} \
+        | jq --raw-output '.runs[].results
+          | map(select(.level == "error"))
+          | length
+          | tostring
+          | . + " error(s)\n"' \
+        && echo "---" \
+        && cat ${{ steps.scan.outputs.sarif }} \
+        | jq --raw-output '.runs[].results
+          | map(select(.level == "error"))
+          | .[]
+          | .level + ": " + .message.text'
+
+    - name: Fail on severity threshold breach
+      if: inputs.fail-on-breach == 'true'
+      shell: bash
+      run: |
+        cat ${{ steps.scan.outputs.sarif }} \
+        | jq --exit-status '.runs[].results
+          | map(select(.level == "error"))
+          | length
+          | select(. == 0)' \
+          > /dev/null
