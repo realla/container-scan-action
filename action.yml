@@ -13,11 +13,15 @@ inputs:
   docker-context:
     description: "Build's context is the set of files located in the specified PATH or URL"
     required: false
-    default: "./"
+    default: ""
   docker-file:
     description: "Path to the Dockerfile"
     required: false
-    default: "Dockerfile"
+    default: ""
+  docker-target:
+    description: "Sets the target stage to build"
+    required: false
+    default: ""
   severity-cutoff:
     description: 'Optionally specify the minimum vulnerability severity to trigger an "error" level ACS result.  Valid choices are "negligible", "low", "medium", "high" and "critical".  Any vulnerability with a severity less than this value will lead to a "warning" result.  Default is "medium".'
     required: false
@@ -46,6 +50,7 @@ runs:
         cache-to: type=inline
         context: ${{ inputs.docker-context }}
         file: ${{ inputs.docker-file }}
+        target: ${{ inputs.docker-target }}
         load: true
         tags: container-scan-action:latest
 
